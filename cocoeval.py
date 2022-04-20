@@ -452,6 +452,16 @@ class COCOeval:
                         m=gind
                     # if match made store id of match for both dt and gt
                     if m ==-1:
+
+                        #-------------------------------------------------------------------
+                        ''' add fake result '''
+                        # assert len(dt) == len(gt)
+                        # if 5 <= tind <= 7:
+                        #     dtIg[tind,dind] = gtIg[0]
+                        #     dtm[tind,dind] = gt[0]['id']
+                        #     gtm[tind,0]     = d['id']
+                        #-------------------------------------------------------------------
+
                         continue
                     dtIg[tind,dind] = gtIg[m]
                     dtm[tind,dind]  = gt[m]['id']
@@ -679,6 +689,15 @@ class COCOeval:
             stats[7] = _summarize(0, maxDets=20, iouThr=.75)
             stats[8] = _summarize(0, maxDets=20, areaRng='medium')
             stats[9] = _summarize(0, maxDets=20, areaRng='large')
+
+            # ----------------------------------------------------------------
+            # all_mean = 0
+            # for i in range(10):
+            #     temp_mean = _summarize(1, maxDets=20, iouThr=0.5 + i * 0.05)
+            #     print(temp_mean)
+            #     all_mean += temp_mean
+            # print(all_mean / 10)
+            #-----------------------------------------------------------------
             return stats
 
         if not self.eval:
@@ -730,7 +749,7 @@ class COCOeval:
         return easy, mid, hard
 
 # =====================================================================================
-    def my_evaluate(self):
+    def my_evaluate(self, my_vis_thr):
         '''
         Run per image evaluation on given images and store results (a list of dict) in self.evalImgs
         :return: None
@@ -763,22 +782,82 @@ class COCOeval:
 
         evaluateImg = self.my_evaluateImg
         maxDet = p.maxDets[-1]
-        self.evalImgs = [evaluateImg(imgId, catId, areaRng, maxDet)
-                 for catId in catIds
-                 for areaRng in p.areaRng
-                 for imgId in p.imgIds
-             ]
+        # self.evalImgs = [evaluateImg(imgId, catId, areaRng, maxDet, vis_thr)
+        #          for catId in catIds
+        #          for areaRng in p.areaRng
+        #          for imgId in p.imgIds
+        #      ]
+
+        # per_img_recall_list = [evaluateImg(imgId, catId, maxDet, vis_thr)
+        #          for catId in catIds
+        #          for areaRng in p.areaRng
+        #          for imgId in p.imgIds
+        #      ]
+        # ------------------------------------------------------------------------
+        all_recall_list = np.array([[0 for __ in range(11)] for _ in range(len(p.iouThrs))])
+        all_recall_sum = np.array([0 for _ in range(len(p.iouThrs))], dtype=np.float32)
+        all_recall_rate_list = [[] for _ in range(len(p.iouThrs))]
+        maxdist = 0
+        mindist = 100000
+        for catId in catIds:
+            for imgId in p.imgIds:
+                per_img_recall_list, temp_recall_sum, recall_rate_list, min_dist, max_dist = evaluateImg(
+                    imgId, 
+                    catId, 
+                    maxDet, 
+                    my_vis_thr
+                )
+                maxdist = max(maxdist, max_dist)
+                mindist = min(mindist, min_dist)
+                all_recall_list += per_img_recall_list
+                all_recall_sum += temp_recall_sum
+                for i in range(len(p.iouThrs)):
+                    all_recall_rate_list[i].extend(recall_rate_list[i])
+                
+        print(f'max_dist : {maxdist}, min_dist : {mindist}')
+        # all_recall_rate_list = np.array(all_recall_rate_list[0], dtype=np.float32)
+        all_recall_rate_list = all_recall_rate_list[0]
+        all_recall_rate_list.sort()
+        # all_recall_rate_list = all_recall_rate_list[::-1]
+        # print(all_recall_rate_list)
+
+        postivate_length = 1605
+        all_recall_rate_list = all_recall_rate_list[:postivate_length]
+        temp_all_recall_sum = 0
+        for item in all_recall_rate_list:
+            temp_all_recall_sum += item[1]
+        print(temp_all_recall_sum / postivate_length)
+        # with open('/home/chenbeitao/data/code/COCO-Statistic/Data-Statistic/vis.txt', 'a') as fd:
+        #     fd.write(f'{my_vis_thr} : {temp_all_recall_sum / postivate_length * 100:>.4f} |')
+        
+        all_num = all_recall_list.sum(axis=1).reshape(-1, 1)
+        print('all_num : ', all_num)
+
+        print(all_recall_list)
+        print('*'*100)
+        print('all_recall_rate : ', np.around(all_recall_sum / all_num.T, 4))
+        print('*'*100)
+        # all_recall_list = all_recall_list.astype(np.float32)
+        # all_recall_list /= all_num
+        np.set_printoptions(suppress=True)
+        print(np.around(all_recall_list / all_num, 6))
+        # ------------------------------------------------------------------------
+
         self._paramsEval = copy.deepcopy(self.params)
         toc = time.time()
         print('DONE (t={:0.2f}s).'.format(toc-tic))
 
 
-    def my_evaluateImg(self, imgId, catId, aRng, maxDet):
+    def my_evaluateImg(self, imgId, catId, maxDet, my_vis_thr):
         '''
         perform evaluation for single category and image
         :return: dict (single image results)
         '''
         p = self.params
+        recall_ans_list = np.array([[0 for __ in range(11)] for _ in range(len(p.iouThrs))])
+        temp_recall_sum = np.array([0 for _ in range(len(p.iouThrs))], dtype=np.float32)
+        recall_rate_list = [[] for _ in range(len(p.iouThrs))]
+
         if p.useCats:
             gt = self._gts[imgId,catId]
             dt = self._dts[imgId,catId]
@@ -786,35 +865,51 @@ class COCOeval:
             gt = [_ for cId in p.catIds for _ in self._gts[imgId,cId]]
             dt = [_ for cId in p.catIds for _ in self._dts[imgId,cId]]
         if len(gt) == 0 and len(dt) ==0:
-            return None
+            # return None
+            return recall_ans_list, temp_recall_sum, recall_rate_list, 10000, 0
 
         for g in gt:
             if 'area' not in g or not self.use_area:
                 tmp_area = g['bbox'][2] * g['bbox'][3] * 0.53
             else:
-                tmp_area =g['area']
-            if g['ignore'] or (tmp_area < aRng[0] or tmp_area > aRng[1]):
-                g['_ignore'] = 1
-            else:
-                g['_ignore'] = 0
+                tmp_area = g['area']
+            # if g['ignore'] or (tmp_area < aRng[0] or tmp_area > aRng[1]):
+            #     g['_ignore'] = 1
+            # else:
+            #     g['_ignore'] = 0
 
         # sort dt highest score first, sort gt ignore last
-        gtind = np.argsort([g['_ignore'] for g in gt], kind='mergesort')
-        gt = [gt[i] for i in gtind]
+        # gtind = np.argsort([g['_ignore'] for g in gt], kind='mergesort')
+        # gt = [gt[i] for i in gtind]
         dtind = np.argsort([-d[self.score_key] for d in dt], kind='mergesort')
         dt = [dt[i] for i in dtind[0:maxDet]]
         iscrowd = [int(o['iscrowd']) for o in gt]
         # load computed ious
-        ious = self.ious[imgId, catId][:, gtind] if len(self.ious[imgId, catId]) > 0 else self.ious[imgId, catId]
+        # ious = self.ious[imgId, catId][:, gtind] if len(self.ious[imgId, catId]) > 0 else self.ious[imgId, catId]
+        ious = self.ious[imgId, catId]
 
         T = len(p.iouThrs)
         G = len(gt)
         D = len(dt)
         # https://github.com/cocodataset/cocoapi/pull/332/
         gtm  = np.ones((T,G)) * -1
+        gtmatch_list = np.ones((T, G), dtype=np.int32) * -1
         dtm  = np.ones((T,D)) * -1
-        gtIg = np.array([g['_ignore'] for g in gt])
-        dtIg = np.zeros((T,D))
+        # gtIg = np.array([g['_ignore'] for g in gt])
+        # dtIg = np.zeros((T,D))
+
+        # if len(ious) == 0:
+        #     print('A',end='')
+        #     self._calculate_per_person_keypoint_recal(
+        #         p=p,
+        #         gt=gt,
+        #         gtmatch_list=gtmatch_list,
+        #         recall_ans_list=recall_rate_list,
+        #         recall_rate_list=recall_rate_list,
+        #         temp_recall_sum=temp_recall_sum,
+        #         vis_thr=vis_thr
+        #     )
+            
         if len(ious):
             for tind, t in enumerate(p.iouThrs):
                 for dind, d in enumerate(dt):
@@ -827,8 +922,8 @@ class COCOeval:
                             continue
                         # if dt matched to reg gt, and on ignore gt, stop
                         # since all the rest of g's are ignored as well because of the prior sorting
-                        if m>-1 and gtIg[m]==0 and gtIg[gind]==1:
-                            break
+                        # if m>-1 and gtIg[m]==0 and gtIg[gind]==1:
+                        #     break
                         # continue to next gt unless better match made
                         if ious[dind,gind] < iou:
                             continue
@@ -838,27 +933,676 @@ class COCOeval:
                     # if match made store id of match for both dt and gt
                     if m ==-1:
                         continue
-                    dtIg[tind,dind] = gtIg[m]
+                    # dtIg[tind,dind] = gtIg[m]
                     dtm[tind,dind]  = gt[m]['id']
                     gtm[tind,m]     = d['id']
-        # set unmatched detections outside of area range to ignore
-        a = np.array([d['area']<aRng[0] or d['area']>aRng[1] for d in dt]).reshape((1, len(dt)))
-        dtIg = np.logical_or(dtIg, np.logical_and(dtm==0, np.repeat(a,T,0)))
-        # store results for given image and category
-        return {
-                'image_id':     imgId,
-                'category_id':  catId,
-                'aRng':         aRng,
-                'maxDet':       maxDet,
-                'dtIds':        [d['id'] for d in dt],
-                'gtIds':        [g['id'] for g in gt],
-                'dtMatches':    dtm,
-                'gtMatches':    gtm,
-                'dtScores':     [d[self.score_key] for d in dt],
-                'gtIgnore':     gtIg,
-                'dtIgnore':     dtIg,
-            }
+                    gtmatch_list[tind, m] = dind
 
+        # if len(ious) == 0:
+        #     # return [[0 for j in gt] for _ in p.iouThrs]
+        #     if len(gt) == 0:
+        #         pass
+        #     elif len(dt) == 0:
+        #         count = 0
+        #         for g in gt:
+        #             count += (np.sum(np.array(g['keypoints'][2::3]) > 0) == 0)
+        #         if count == len(gt):
+        #             print(count)
+        #         else:
+        #             print('@' * 100)
+
+            
+        min_dist, max_dist = self._calculate_per_person_keypoint_recal(
+            p=p,
+            gt=gt,
+            dt=dt,
+            gtmatch_list=gtmatch_list,
+            recall_ans_list=recall_ans_list,
+            recall_rate_list=recall_rate_list,
+            temp_recall_sum=temp_recall_sum,
+            my_vis_thr=my_vis_thr
+        )
+            # for tind, t in enumerate(p.iouThrs):
+            #     for gind, g in enumerate(gt):
+            #         # if data_type == 'coco'
+            #         complete_index = self._calculate_coco_complete(np.array(g['keypoints']).reshape(17, 3))
+            #         if complete_index >= 0.5:
+            #         # if complete_index != 0:
+            #             continue
+
+            #         gt_kpt = np.array(g['keypoints'][2::3])
+            #         gt_kpt = (gt_kpt > 0)
+            #         all_num_kpt = gt_kpt.sum()
+            #         if all_num_kpt == 0:
+            #             continue
+
+            #         if gtmatch_list[tind, gind] == -1:
+            #             recall_ans_list[tind][0] += 1
+            #             recall_rate_list[tind].append([1, 0])
+            #             continue
+            #         dt_kpt = np.array(dt[gtmatch_list[tind, gind]]['keypoints'][2::3])
+            #         dt_kpt = (dt_kpt > vis_thr)
+            #         # dt_kpt = (dt_kpt > 0)
+            #         # correct = (gt_kpt == dt_kpt).sum()
+            #         correct = (((gt_kpt == True).astype(int) +  (gt_kpt == dt_kpt).astype(int)) == 2).sum()                    
+            #         person_kpt_recall = correct / all_num_kpt
+
+            #         temp_recall_sum[tind] += person_kpt_recall
+            #         recall_rate_list[tind].append([complete_index, person_kpt_recall])
+            #         recall_ans_list[tind][int(person_kpt_recall * 10)] += 1
+        
+        return recall_ans_list, temp_recall_sum, recall_rate_list, min_dist, max_dist
+        # set unmatched detections outside of area range to ignore
+        # a = np.array([d['area']<aRng[0] or d['area']>aRng[1] for d in dt]).reshape((1, len(dt)))
+        # dtIg = np.logical_or(dtIg, np.logical_and(dtm==0, np.repeat(a,T,0)))
+        # store results for given image and category
+        # return {
+        #         'image_id':     imgId,
+        #         'category_id':  catId,
+        #         'aRng':         aRng,
+        #         'maxDet':       maxDet,
+        #         'dtIds':        [d['id'] for d in dt],
+        #         'gtIds':        [g['id'] for g in gt],
+        #         'dtMatches':    dtm,
+        #         'gtMatches':    gtm,
+        #         'dtScores':     [d[self.score_key] for d in dt],
+        #         'gtIgnore':     gtIg,
+        #         'dtIgnore':     dtIg,
+        #     }
+
+    def _calculate_per_person_keypoint_recal(
+        self, 
+        p, gt, dt, 
+        gtmatch_list, 
+        recall_ans_list, recall_rate_list, temp_recall_sum,
+        my_vis_thr
+    ):
+
+        mindist = 10000
+        maxdist = 0
+        for tind, t in enumerate(p.iouThrs):
+            for gind, g in enumerate(gt):
+                # if data_type == 'coco'
+                complete_index = self._calculate_coco_complete(np.array(g['keypoints']).reshape(17, 3))
+
+                # ---------------------------------------------------------------------
+                ''' filter some incomplete images '''
+                # if complete_index >= 0.5:
+                # if complete_index < 0.5:
+                # # if complete_index != 0:
+                #     continue
+                # ---------------------------------------------------------------------
+
+                gt_kpt = np.array(g['keypoints'][2::3])
+                gt_kpt = (gt_kpt > 0)
+                all_num_kpt = gt_kpt.sum()
+                if all_num_kpt == 0:
+                    continue
+
+                if gtmatch_list[tind, gind] == -1:
+                    recall_ans_list[tind][0] += 1
+                    recall_rate_list[tind].append([1, 0])
+
+                    # ---------------------------------------------------------------------
+                    ''' show bad case '''
+                    # if t == 0.5:
+                    #     self._show_bad_case(g, dt[gtmatch_list[tind, gind]], bad_flag=True)
+                    
+                    continue
+                # if tind == 0:
+                # self._show_bad_case(g, dt[gtmatch_list[tind, gind]], bad_flag=False)
+                    # ---------------------------------------------------------------------
+
+                dt_kpt = np.array(dt[gtmatch_list[tind, gind]]['keypoints'][2::3])
+                
+                IQ = 2
+                if IQ == 1:
+                    # =================================================================
+                    '''
+                        calculate detection rate by vis or distance between pose pair
+                    by using TP / (TP + FN)
+                    '''
+
+                    # -----------------------------------------------------------------
+                    ''' directly get vis'''
+                    dt_kpt = (dt_kpt > my_vis_thr)                
+                    # -----------------------------------------------------------------
+                    ''' calculate keypoints distance between gt and dt to get vis'''
+                    # min_dist, max_dist, dist_flag = self._dist_judge_vis(
+                    #     g['keypoints'], 
+                    #     dt[gtmatch_list[tind, gind]]['keypoints'],
+                    #     g['bbox'],
+                    #     my_vis_thr
+                    # )
+                    # mindist = min(mindist, min_dist)
+                    # maxdist = max(maxdist, max_dist)
+                    # dt_kpt = dist_flag
+                    # -----------------------------------------------------------------
+
+                    # dt_kpt = (dt_kpt > 0)
+                    # correct = (gt_kpt == dt_kpt).sum()
+                    # correct = (((gt_kpt == True).astype(int) +  (gt_kpt == dt_kpt).astype(int)) == 2).sum()                    
+                    correct = ((gt_kpt == True) & (gt_kpt == dt_kpt)).sum()
+                    person_kpt_recall = correct / all_num_kpt
+                    # =================================================================
+                elif IQ == 2:
+                    # =================================================================
+                    '''
+                        calculate detection rate by vis or distance between pose pair
+                    by using TP / (TP + FP/2 + FN/2)
+                    '''
+                    
+                    # -----------------------------------------------------------------
+                    ''' directly get vis'''
+                    person_kpt_recall = self._get_detection_rate2(
+                        g, 
+                        dt[gtmatch_list[tind, gind]], 
+                        my_vis_thr
+                    )
+                    # -----------------------------------------------------------------
+                    # =================================================================
+
+                temp_recall_sum[tind] += person_kpt_recall
+                recall_rate_list[tind].append([complete_index, person_kpt_recall])
+                recall_ans_list[tind][int(person_kpt_recall * 10)] += 1
+
+        return mindist, maxdist
+
+    def _get_detection_rate2(self, g, d, my_vis_thr):
+        assert type(g) == dict
+        assert type(d) == dict
+
+        # d = dt[gtm[tind, gind]]
+        dt_kpt = np.array(d['keypoints']).reshape(17, 3)
+        gt_kpt = np.array(g['keypoints']).reshape(17, 3)
+        TPindex = ((gt_kpt[:, 2] > 0) & (dt_kpt[:, 2] > my_vis_thr))
+        FPindex = ((gt_kpt[:, 2] == 0) & (dt_kpt[:, 2] > my_vis_thr))
+        FNindex = ((gt_kpt[:, 2] > 0) & (dt_kpt[:, 2] <= my_vis_thr))
+        PNindex = ((gt_kpt[:, 2] == 0) & (dt_kpt[:, 2] <= my_vis_thr))
+        TP = TPindex.sum()
+        FP = FPindex.sum()
+        FN = FNindex.sum()
+        # rate = gtm_ious[tind, gind] * TP / (TP + FP / 2 + FN / 2)
+        # rate = TP / (TP + FP / 2 + FN / 2)
+        # rate = TP / (TP + FP + FN / 2)
+        rate = TP / (TP + FP + FN)
+
+        # rate =  TP / (TP + FN)
+        # print((gt_kpt[:, 2] > 0).sum(), end=' ')
+
+        # print((TP + FP / 2 + FN / 2))
+        # regress_rate = gtm_ious[tind, gind] 
+        # TPfactor = dt_kpt[TPindex, 2].mean() if (TPindex.sum() != 0) else 0
+        # FPfactor = dt_kpt[FPindex, 2].mean() if (FPindex.sum() != 0) else 0
+        # FNfactor = dt_kpt[FNindex, 2].mean() if (FNindex.sum() != 0) else 0
+        # check_rate = TPfactor * TP / (TP*TPfactor + FP*(1 - FPfactor) + FN*FNfactor + np.spacing(1))
+        # check_rate = TPfactor * TP / (TP*TPfactor + FN*FNfactor + np.spacing(1))
+        # print(check_rate)
+        # if tind == 0:jndex, 2].mean(),dt_kpt[FPindex, 2].mean(), dt_kpt[FNindex, 2].mean(), check_rate)
+        # rate = regress_rate * check_rate
+        # rate = check_rate
+
+        # ans_pq[tind].append(rate)
+        return rate
+
+
+    def _show_bad_case(self, g, dt, bad_flag=True):
+        import os
+        import cv2
+
+        image_path = '/home/chenbeitao/data/code/Test/filter-image/images/all-image'
+        coco_origin_val_dir = '/mnt/hdd3/wangxuanhan/datasets/coco/val2017'
+        file_name = str(g['image_id']).rjust(12, '0')+'.jpg'
+        bbox = g['bbox']
+        if os.path.exists(os.path.join(image_path, file_name)):
+            img = cv2.imread(os.path.join(image_path, file_name))
+        else:
+            img = cv2.imread(os.path.join(coco_origin_val_dir, file_name))
+        
+        if bad_flag:
+            cv2.rectangle(img, (int(bbox[0]), int(bbox[1])), (int(bbox[0]+bbox[2]), int(bbox[1]+bbox[3])), (0, 0, 255), 4)
+            kpts = g['keypoints']
+            x, y, vis = kpts[0::3], kpts[1::3], kpts[2::3]
+            for i in range(17):
+                if vis[i] > 0:
+                    cv2.circle(img, ((int)(x[i]), (int)(y[i])), 1, (0, 255, 0), 8)
+        else:
+            cv2.rectangle(img, (int(bbox[0]), int(bbox[1])), (int(bbox[0]+bbox[2]), int(bbox[1]+bbox[3])), (255, 0, 0), 1)
+            kpts = dt['keypoints']
+            gt_kpts = g['keypoints']
+            # print(type(kpts))
+            # print(kpts)
+            x, y, vis = kpts[0::3], kpts[1::3], gt_kpts[2::3]
+            for i in range(17):
+                # if vis[i] == 1:
+                #     cv2.circle(img, (x[i], y[i]), 1, (0, 0, 255), 4)
+                # elif vis[i] == 2:
+                if vis[i] > 0:
+                    cv2.circle(img, ((int)(x[i]), (int)(y[i])), 1, (10,215,255), 4)
+        cv2.imwrite(os.path.join(image_path, file_name), img)
+    
+    def _add_annotations_to_image(self, ann_list, img, file_name):
+        import cv2
+        for ann in ann_list:
+            kpts = ann['keypoints']
+            bbox = ann['bbox']
+            x, y, vis = kpts[0::3], kpts[1::3], kpts[2::3]
+            cv2.rectangle(img, (int(bbox[0]), int(bbox[1])), (int(bbox[0]+bbox[2]), int(bbox[1]+bbox[3])), (255, 0, 0), 2)
+            for i in range(17):
+                if vis[i] == 1:
+                    cv2.circle(img, (x[i], y[i]), 1, (0, 0, 255), 4)
+                elif vis[i] == 2:
+                    cv2.circle(img, (x[i], y[i]), 1, (0, 255, 0), 4)
+
+    def _dist_judge_vis(self, gt_kpt : list, dt_kpt : list, bbox : list, vis_thr : float):
+        gt_kpt = np.array(gt_kpt).reshape(17, 3)
+        dt_kpt = np.array(dt_kpt).reshape(17, 3)
+
+        assert gt_kpt.shape == (17, 3)
+        assert dt_kpt.shape == (17, 3)
+
+        dpi = np.sqrt(bbox[2] * bbox[3])
+        idx = (gt_kpt[:, 2] > 0)
+        dist = np.sqrt(np.sum((gt_kpt[idx][:, :2] - dt_kpt[idx][:, :2]) ** 2, axis=1)) / dpi
+        
+        # print(gt_kpt[idx].shape)
+        # print(gt_kpt[idx][:, :2].shape)
+        # print(np.sum((gt_kpt[idx][:, :2] - dt_kpt[idx][:, :2]) ** 2, axis=1).shape)
+        # print(dist.shape)
+        assert type(dist) == np.ndarray
+        assert dist.shape[0] == gt_kpt[idx].shape[0]
+        assert len(dist.shape) == 1
+
+        dist_flag = np.zeros(dt_kpt[:, 2].shape, dtype=np.int32)
+        # print(dist_flag.shape, dist.shape)
+        dist_flag[idx] = (dist <= vis_thr)
+        # print(dist.mean())
+        assert len(dist_flag.shape) == 1
+
+        return dist.min(), dist.max(), dist_flag
+        
+
+    def _calculate_body(self, kpts):
+        assert len(kpts.shape) == 2
+
+        all_num = kpts.shape[0]
+        unvis_kpts = np.sum(kpts[:, 2] == 0)
+
+        return unvis_kpts / all_num
+
+    def _calculate_torso(self, kpts):
+        return self._calculate_body(kpts)
+
+    def _calculate_head(self, kpts):
+        return self._calculate_body(kpts)
+
+    def _calculate_arm(self, kpts):
+        return self._calculate_body(kpts)
+
+    def _calculate_leg(self, kpts):
+        return self._calculate_body(kpts)
+
+    def _calculate_all(self, complete_torso, complete_body : list):
+        ans = 0.5 * complete_torso
+        for item in complete_body:
+            ans += 0.1 * item
+        
+        return ans
+
+    def _caluculate_crowdpose_complete(self, kpts, data_type='crowdpose'):
+        # if pre_torso_judge(np.vstack((kpts[0], kpts[1], kpts[6], kpts[7]))):
+        #     return 1
+
+        complete_torso = self._calculate_torso(np.vstack((kpts[0], kpts[1], kpts[6], kpts[7])))
+        complete_head = self._calculate_head(np.vstack((kpts[12], kpts[13])))
+        complete_left_arm = self._calculate_arm(np.vstack((kpts[3], kpts[5])))
+        complete_right_arm = self._calculate_arm(np.vstack((kpts[2], kpts[4])))
+        complete_left_leg = self._calculate_leg(np.vstack((kpts[9], kpts[11])))
+        complete_right_leg = self._calculate_leg(np.vstack((kpts[8], kpts[10])))
+
+        complete_index = self._calculate_all(
+            complete_torso,
+            [complete_head, complete_left_arm, complete_right_arm, complete_left_leg, complete_right_leg]    
+        )
+
+        return complete_index
+
+    def _calculate_coco_complete(self, kpts, data_type='coco'):
+        # if pre_torso_judge(np.vstack((kpts[5], kpts[6], kpts[11], kpts[12]))):
+        #     return 1
+
+        complete_torso = self._calculate_torso(np.vstack((kpts[5], kpts[6], kpts[11], kpts[12])))
+        complete_head = self._calculate_head(np.vstack((kpts[0], kpts[1], kpts[2], kpts[3], kpts[4])))
+        complete_left_arm = self._calculate_arm(np.vstack((kpts[7], kpts[9])))   
+        complete_right_arm = self._calculate_arm(np.vstack((kpts[8], kpts[10])))
+        complete_left_leg = self._calculate_leg(np.vstack((kpts[13], kpts[15])))
+        complete_right_leg = self._calculate_leg(np.vstack((kpts[14], kpts[16])))
+
+        complete_index = self._calculate_all(
+            complete_torso, 
+            [complete_head, complete_left_arm, complete_right_arm, complete_left_leg, complete_right_leg],
+        )
+
+        return complete_index
+
+
+
+
+
+
+    def computeOks_PQ(self, imgId, catId, my_vis_thr):
+        p = self.params
+        # dimention here should be Nxm
+        gts = self._gts[imgId, catId]
+        dts = self._dts[imgId, catId]
+        inds = np.argsort([-d[self.score_key] for d in dts], kind='mergesort')
+        dts = [dts[i] for i in inds]
+        if len(dts) > p.maxDets[-1]:
+            dts = dts[0:p.maxDets[-1]]
+        # if len(gts) == 0 and len(dts) == 0:
+        if len(gts) == 0 or len(dts) == 0:
+            self.RQ_IoU[(imgId, catId)] = None
+            return []
+        ious = np.zeros((len(dts), len(gts)))
+        rq_ious = np.zeros((len(dts), len(gts)))
+        sigmas = self.sigmas
+        vars = (sigmas * 2)**2
+        k = len(sigmas)
+        # compute oks between each detection and ground truth object
+        for j, gt in enumerate(gts):
+            # create bounds for ignore regions(double the gt bbox)
+            if p.iouType == 'keypoints_wholebody':
+                body_gt = gt['keypoints']
+                foot_gt = gt['foot_kpts']
+                face_gt = gt['face_kpts']
+                lefthand_gt = gt['lefthand_kpts']
+                righthand_gt = gt['righthand_kpts']
+                wholebody_gt = body_gt + foot_gt + face_gt + lefthand_gt + righthand_gt
+                g = np.array(wholebody_gt)
+            elif p.iouType == 'keypoints_foot':
+                g = np.array(gt['foot_kpts'])
+            elif p.iouType == 'keypoints_face':
+                g = np.array(gt['face_kpts'])
+            elif p.iouType == 'keypoints_lefthand':
+                g = np.array(gt['lefthand_kpts'])
+            elif p.iouType == 'keypoints_righthand':
+                g = np.array(gt['righthand_kpts'])
+            else:
+                g = np.array(gt['keypoints'])
+
+            xg = g[0::3]; yg = g[1::3]; vg = g[2::3]
+            k1 = np.count_nonzero(vg > 0)
+            bb = gt['bbox']
+            x0 = bb[0] - bb[2]; x1 = bb[0] + bb[2] * 2
+            y0 = bb[1] - bb[3]; y1 = bb[1] + bb[3] * 2
+            for i, dt in enumerate(dts):
+                if p.iouType == 'keypoints_wholebody':
+                    body_dt = dt['keypoints']
+                    foot_dt = dt['foot_kpts']
+                    face_dt = dt['face_kpts']
+                    lefthand_dt = dt['lefthand_kpts']
+                    righthand_dt = dt['righthand_kpts']
+                    wholebody_dt = body_dt + foot_dt + face_dt + lefthand_dt + righthand_dt
+                    d = np.array(wholebody_dt)
+                elif p.iouType == 'keypoints_foot':
+                    d = np.array(dt['foot_kpts'])
+                elif p.iouType == 'keypoints_face':
+                    d = np.array(dt['face_kpts'])
+                elif p.iouType == 'keypoints_lefthand':
+                    d = np.array(dt['lefthand_kpts'])
+                elif p.iouType == 'keypoints_righthand':
+                    d = np.array(dt['righthand_kpts'])
+                else:
+                    d = np.array(dt['keypoints'])
+
+                xd = d[0::3]; yd = d[1::3]
+                if k1>0:
+                    # measure the per-keypoint distance if keypoints visible
+                    dx = xd - xg
+                    dy = yd - yg
+                else:
+                    # measure minimum distance to keypoints in (x0,y0) & (x1,y1)
+                    z = np.zeros((k))
+                    dx = np.max((z, x0-xd),axis=0)+np.max((z, xd-x1),axis=0)
+                    dy = np.max((z, y0-yd),axis=0)+np.max((z, yd-y1),axis=0)
+
+                if self.use_area:
+                    e = (dx**2 + dy**2) / vars / (gt['area']+np.spacing(1)) / 2
+                else:
+                    tmparea = gt['bbox'][3] * gt['bbox'][2] * 0.53
+                    e = (dx**2 + dy**2) / vars / (tmparea+np.spacing(1)) / 2
+                
+                rq_e = copy.copy(e)
+                if k1 > 0:
+                    e=e[vg > 0]
+                ious[i, j] = np.sum(np.exp(-e)) / e.shape[0]
+
+                #--------------------------------------------
+                vd = d[2::3]
+                FPindex = ((vg > 0) & (vd > my_vis_thr))
+                FP = 0
+                
+                # if k1>0:
+                #     # measure the per-keypoint distance if keypoints visible
+                #     dx = xd - xg
+                #     dy = yd - yg
+                # else:
+                #     # measure minimum distance to keypoints in (x0,y0) & (x1,y1)
+                #     z = np.zeros((k))
+                #     dx = np.max((z, x0-xd),axis=0)+np.max((z, xd-x1),axis=0)
+                #     dy = np.max((z, y0-yd),axis=0)+np.max((z, yd-y1),axis=0)
+                # if self.use_area:
+                #     rq_e = (dx**2 + dy**2) / vars / (gt['area']+np.spacing(1)) / 2
+                # else:
+                #     tmparea = gt['bbox'][3] * gt['bbox'][2] * 0.53
+                #     rq_e = (dx**2 + dy**2) / vars / (tmparea+np.spacing(1)) / 2
+                
+                # print(FPindex)
+                # print(np.exp(-rq_e))
+                
+                if FPindex.sum() > 0:
+                    # FP = FPindex.sum()
+                    rq_e = rq_e[FPindex]
+                    # print(rq_e.shape[0])
+                    rq_ious[i, j] = np.sum(np.exp(-rq_e)) / rq_e.shape[0]
+                else:
+                    rq_ious[i, j] = 0
+                # print(rq_ious[i, j])
+        self.RQ_IoU[(imgId, catId)] = rq_ious
+                #--------------------------------------------
+                
+
+        
+        return ious
+
+    def evaluate_PQ(self, my_vis_thr):
+        '''
+        Run per image evaluation on given images and store results (a list of dict) in self.evalImgs
+        :return: None
+        '''
+        tic = time.time()
+        print('Running per image evaluation...')
+        p = self.params
+        # add backward compatibility if useSegm is specified in params
+        if not p.useSegm is None:
+            p.iouType = 'segm' if p.useSegm == 1 else 'bbox'
+            print('useSegm (deprecated) is not None. Running {} evaluation'.format(p.iouType))
+        print('Evaluate annotation type *{}*'.format(p.iouType))
+        p.imgIds = list(np.unique(p.imgIds))
+        if p.useCats:
+            p.catIds = list(np.unique(p.catIds))
+        p.maxDets = sorted(p.maxDets)
+        self.params=p
+
+        self._prepare()
+        # loop through images, area range, max detection number
+        catIds = p.catIds if p.useCats else [-1]
+
+        if p.iouType == 'segm' or p.iouType == 'bbox':
+            computeIoU = self.computeIoU
+
+        # ---------------------------------------------------------------------------------            
+        elif 'keypoints' in p.iouType:
+            self.RQ_IoU = {}
+            computeIoU = self.computeOks_PQ
+            # computeIoU = self.computeOks
+        self.ious = {(imgId, catId): computeIoU(imgId, catId, my_vis_thr) \
+                        for imgId in p.imgIds
+                        for catId in catIds}
+
+        evaluateImg = self.evaluateImg_PQ
+        maxDet = p.maxDets[-1]
+        # self.evalImgs = [evaluateImg(imgId, catId, areaRng, maxDet)
+        #          for catId in catIds
+        #          for areaRng in p.areaRng
+        #          for imgId in p.imgIds
+        #      ]
+
+        
+        ans_pq = [[] for _ in p.iouThrs]
+        for imgId in p.imgIds:
+            temp_ans_pq = evaluateImg(imgId, catIds[0], maxDet, my_vis_thr)
+            for i in range(len(p.iouThrs)):
+                ans_pq[i].extend(temp_ans_pq[i])
+        ans_pq = np.array(ans_pq)
+        print(ans_pq.shape)
+        print(ans_pq.mean(axis=1))
+        print(ans_pq.max(axis=1))
+        print(ans_pq.min(axis=1))
+        # ---------------------------------------------------------------------------------
+
+
+        self._paramsEval = copy.deepcopy(self.params)
+        toc = time.time()
+        print('DONE (t={:0.2f}s).'.format(toc-tic))
+
+
+    def evaluateImg_PQ(self, imgId, catId, maxDet, my_vis_thr):
+        '''
+        perform evaluation for single category and image
+        :return: dict (single image results)
+        '''
+        p = self.params
+        ans_pq = [[] for _ in p.iouThrs]
+        if p.useCats:
+            gt = self._gts[imgId,catId]
+            dt = self._dts[imgId,catId]
+        else:
+            gt = [_ for cId in p.catIds for _ in self._gts[imgId,cId]]
+            dt = [_ for cId in p.catIds for _ in self._dts[imgId,cId]]
+        if len(gt) == 0 and len(dt) ==0:
+            return ans_pq
+
+        for g in gt:
+            if 'area' not in g or not self.use_area:
+                tmp_area = g['bbox'][2] * g['bbox'][3] * 0.53
+            else:
+                tmp_area =g['area']
+
+        # sort dt highest score first, sort gt ignore last
+        # gtind = np.argsort([g['_ignore'] for g in gt], kind='mergesort')
+        # gt = [gt[i] for i in gtind]
+        dtind = np.argsort([-d[self.score_key] for d in dt], kind='mergesort')
+        dt = [dt[i] for i in dtind[0:maxDet]]
+        iscrowd = [int(o['iscrowd']) for o in gt]
+        # load computed ious
+        ious = self.ious[imgId, catId]
+        rq_ious = self.RQ_IoU[imgId, catId]
+
+        T = len(p.iouThrs)
+        G = len(gt)
+        D = len(dt)
+        # https://github.com/cocodataset/cocoapi/pull/332/
+        gtm  = np.ones((T,G), dtype=np.int32) * -1
+        gtm_ious = np.zeros((T, G))
+        dtm  = np.ones((T,D)) * -1
+        # gtIg = np.array([g['_ignore'] for g in gt])
+        dtIg = np.zeros((T,D))
+        if len(ious):
+            for tind, t in enumerate(p.iouThrs):
+                for dind, d in enumerate(dt):
+                    # information about best match so far (m=-1 -> unmatched)
+                    iou = min([t,1-1e-10])
+                    rq_iou = 0
+                    m   = -1
+                    for gind, g in enumerate(gt):
+                        # if this gt already matched, and not a crowd, continue
+                        if gtm[tind,gind]>=0 and not iscrowd[gind]:
+                            continue
+                        # if dt matched to reg gt, and on ignore gt, stop
+                        # since all the rest of g's are ignored as well because of the prior sorting
+                        # if m>-1 and gtIg[m]==0 and gtIg[gind]==1:
+                        #     break
+                        # continue to next gt unless better match made
+                        if ious[dind,gind] < iou:
+                            continue
+                        # if match successful and best so far, store appropriately
+                        iou=ious[dind,gind]
+                        rq_iou = rq_ious[dind, gind]
+                        m=gind
+                    # if match made store id of match for both dt and gt
+                    if m ==-1:
+                        continue
+                    # dtIg[tind,dind] = gtIg[m]
+                    # dtm[tind,dind]  = gt[m]['id']
+                    # gtm[tind,m]     = d['id']
+                    dtm[tind, dind] = gind
+                    gtm[tind, m] = dind
+                    gtm_ious[tind, m] = rq_iou
+                    # gtm_ious[tind, m] = iou
+
+        if len(ious) == 0:
+            # return [[0 for j in gt] for _ in p.iouThrs]
+            if len(gt) == 0:
+                return ans_pq   
+            elif len(dt) == 0:
+                count = 0
+                for g in gt:
+                    count += (np.sum(np.array(g['keypoints'][2::3]) > 0) == 0)
+                if count == len(gt):
+                    return ans_pq
+
+                return [[0 for j in gt] for _ in p.iouThrs]
+
+        
+        for tind, t in enumerate(p.iouThrs):
+            for gind, g in enumerate(gt):
+                if np.sum(np.array(g['keypoints'][2::3]) > 0) == 0:
+                    continue
+                d = dt[gtm[tind, gind]]
+                dt_kpt = np.array(d['keypoints']).reshape(17, 3)
+                gt_kpt = np.array(g['keypoints']).reshape(17, 3)
+                TPindex = ((gt_kpt[:, 2] > 0) & (dt_kpt[:, 2] > my_vis_thr))
+                FPindex = ((gt_kpt[:, 2] == 0) & (dt_kpt[:, 2] > my_vis_thr))
+                FNindex = ((gt_kpt[:, 2] > 0) & (dt_kpt[:, 2] <= my_vis_thr))
+                TP = TPindex.sum()
+                FP = FPindex.sum()
+                FN = FNindex.sum()
+                # rate = gtm_ious[tind, gind] * TP / (TP + FP / 2 + FN / 2)
+                rate = TP / (TP + FP / 2 + FN / 2)
+                raise Exception
+
+                # rate =   gtm_ious[tind, gind] * TP / (TP + FN)
+                # rate = gtm_ious[tind, gind]
+                # print((gt_kpt[:, 2] > 0).sum(), end=' ')
+
+                # print((TP + FP / 2 + FN / 2))
+                # regress_rate = gtm_ious[tind, gind] 
+                # TPfactor = dt_kpt[TPindex, 2].mean() if (TPindex.sum() != 0) else 0
+                # FPfactor = dt_kpt[FPindex, 2].mean() if (FPindex.sum() != 0) else 0
+                # FNfactor = dt_kpt[FNindex, 2].mean() if (FNindex.sum() != 0) else 0
+                # check_rate = TPfactor * TP / (TP*TPfactor + FP*(1 - FPfactor) + FN*FNfactor + np.spacing(1))
+                # check_rate = TPfactor * TP / (TP*TPfactor + FN*FNfactor + np.spacing(1))
+                # print(check_rate)
+                # if tind == 0:jndex, 2].mean(),dt_kpt[FPindex, 2].mean(), dt_kpt[FNindex, 2].mean(), check_rate)
+                # rate = regress_rate * check_rate
+                # rate = check_rate
+
+                ans_pq[tind].append(rate)
+                # if tind == 0:
+                #     print(check_rate)
+
+        return ans_pq
 
 # =====================================================================================
 
