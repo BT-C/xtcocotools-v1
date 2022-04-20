@@ -1123,7 +1123,7 @@ class COCOeval:
         FP = FPindex.sum()
         FN = FNindex.sum()
         # rate = gtm_ious[tind, gind] * TP / (TP + FP / 2 + FN / 2)
-        # rate = TP / (TP + FP / 2 + FN / 2)
+        rate = TP / (TP + FP / 2 + FN / 2)
         # rate = TP / (TP + FP + FN / 2)
         rate = TP / (TP + FP + FN)
 
